@@ -6,9 +6,9 @@
 ---
 
 ## 🚀 Project Overview
-This research project explores the implementation and performance of **Google Swift**, a state-of-the-art congestion control protocol designed for high-performance datacenter environments. Using the **ns-3 (Network Simulator 3)**, we evaluate Swift's ability to manage ultra-low latency requirements and solve "Incast" congestion through precise delay-gradient pacing.
+This research project implements and evaluates **Google Swift**, a delay-based congestion control protocol designed for high-performance datacenter environments. Using the **ns-3 (Network Simulator 3)**, we analyze Swift's ability to maintain ultra-low latency and solve "Incast" congestion through precise delay-gradient pacing.
 
-In modern datacenters, "Mice" flows (short-lived RPCs) and "Elephant" flows (long-lived bulk data) compete for the same bottleneck link. Standard loss-based protocols (like TCP Cubic) often fill router buffers, causing high tail-latency. Swift solves this by monitoring the slope of RTT ($dR/dt$) to react *before* packet loss occurs.
+In modern datacenters, "Mice" flows (short-lived RPCs) and "Elephant" flows (long-lived bulk data) compete for the same bottleneck. Standard loss-based protocols (like TCP Cubic) often fill router buffers, causing **Bufferbloat**. Swift solves this by monitoring the slope of RTT ($dR/dt$) to react *before* packet loss occurs.
 
 ---
 
@@ -16,40 +16,55 @@ In modern datacenters, "Mice" flows (short-lived RPCs) and "Elephant" flows (lon
 
 ### Core Protocol Modifications
 We modified the core ns-3 internet stack to support Swift's delay-sensitive logic:
-- **`src/internet/model/tcp-swift.cc & .h`**: Implemented the core window adjustment math:
-  $$\text{cwnd} = \text{cwnd} + \alpha \left(1 - \frac{\text{delay}}{\text{target}}\right)$$
-- **`src/internet/model/tcp-socket-base.cc & .h`**: Enabled microsecond-precision RTT sampling and per-packet timestamping to decompose RTT into Host and Fabric components.
-- **`src/internet/model/tcp-socket-state.cc & .h`**: Updated to store the state variables required for multi-flow fairness.
+- **`src/internet/model/tcp-swift.cc & .h`**: Implementation of the delay-gradient logic and window adjustment math:
+  $$cwnd = cwnd + \alpha \left(1 - \frac{delay}{target}\right)$$
+- **`src/internet/model/tcp-socket-base.cc & .h`**: Enhanced for microsecond-precision RTT sampling and RTT decomposition into **Host** and **Fabric** components.
+- **`src/internet/model/tcp-socket-state.cc & .h`**: Updated to track Swift-specific congestion state variables.
 
 ### The "Swift Handcuffs" (Experimental Setup)
-To observe Swift's behavior on small "Mice" flows that normally finish too fast for analysis, we manually tuned the TCP environment:
+To observe Swift's behavior on tiny "Mice" flows that usually finish before the Congestion Avoidance phase, we tuned the TCP environment:
 - **`InitialCwnd = 1`**: Forces the protocol to pace the transfer from the first byte.
-- **`InitialSlowStartThreshold = 2`**: Effectively disables "Slow Start," forcing the flow into Swift's delay-governed Congestion Avoidance phase immediately.
+- **`InitialSlowStartThreshold = 2`**: Effectively disables "Slow Start," forcing the flow into Swift's delay-governed phase immediately.
 - **`Time::SetResolution(Time::NS)`**: Mandatory for calculating sub-millisecond delay gradients.
 
 ---
 
-## 📊 Simulation Scenarios
+## 🧪 Experimental Methodology
 
-### 1. 2-Node Basic Validation (`swift-test-mice.cc`)
-* **Setup:** Single sender and receiver on a 10 Mbps bottleneck.
-* **Logic:** Isolate the algorithm’s reaction to a single bottleneck.
+The performance was evaluated across three topological scales, shifting from high-speed datacenter links to extreme bottleneck scenarios.
+
+| Script | Scale | Bottleneck | Target Metric |
+| :--- | :--- | :--- | :--- |
+| `swift-test.cc` | 2-Node | **10 Gbps** | Host Delay vs. Fabric Delay |
+| `swift-fairness.cc` | 10-Node | **1 Gbps** | Fairness & Flow Convergence |
+| `swift-incast.cc` | 100-Node | **100 Mbps** | 100:1 Oversubscription Resilience |
+
+### High Oversubscription Analysis
+We specifically tested the "Incast" scenario with a **100:1 Oversubscription Ratio**. 
+- **Aggregated Ingress Capacity:** 100 Nodes $\times$ 100 Mbps = 10,000 Mbps (10 Gbps).
+- **Bottleneck Capacity:** 100 Mbps.
+- **The Result:** Despite this extreme pressure, Swift maintained a **near-zero queue depth ($\leq 1$ packet)**. This proves that Swift’s delay-pacing is robust enough to handle the "Incast" bursts common in distributed computing (MapReduce/ML) without requiring deep, expensive switch buffers.
+
+---
+
+## 📊 Simulation Scenarios (`scratch/`)
+
+### 1. Basic Validation (`swift-test-mice.cc`)
+* **Logic:** Isolates the algorithm’s reaction to a single bottleneck.
 * **Result:** Proved the "Micro-Sawtooth" behavior. As the RTT gradient increases toward a threshold, the CWND proactively shrinks, preventing buffer overflow.
 
-### 2. 10-Node Fairness Study (`swift-fairness-mice.cc`)
-* **Setup:** 10 Senders in a Dumbbell topology with asymmetric file sizes (10KB, 50KB, 100KB) and staggered start times.
-* **Logic:** Evaluates how Swift handles asymmetric competition and ensures "newcomer" flows can achieve their fair share.
-* **Result:** Validated fairness. Existing flows proactively shrank their windows to accommodate new flows, maintaining a stable RTT for the entire group.
+### 2. Fairness Study (`swift-fairness-mice.cc`)
+* **Logic:** Evaluates how Swift handles asymmetric competition (10KB, 50KB, 100KB sizes) and staggered starts.
+* **Result:** Existing flows proactively shrank their windows to accommodate new flows, maintaining a stable RTT for the entire group.
 
 ### 3. 100-Node Incast Stress Test (`swift-incast-mice.cc`)
-* **Setup:** 100 simultaneous "Mice" flows hitting a single 10 Mbps bottleneck with a shallow 20-packet buffer.
 * **Telemetry:** Implemented a **1ms recursive polling function** (`PollCwnd`) to track window dynamics across 100 concurrent sockets.
-* **Result:** Demonstrated **Zero-Queuing**. The bottleneck router maintained a queue depth of $\leq 1$ packet, successfully eliminating Bufferbloat under heavy load.
+* **Result:** Demonstrated **Zero-Queuing**. Proved that Swift can handle a massive burst without dropping packets or filling the 20-packet router buffer.
 
 ### 4. Mixed Workload: Mice vs. Elephants (`swift-incast-mixed.cc`)
-* **Setup:** A heterogeneous environment with an 80/20 distribution (80% Mice, 20% Elephants). Specifically tracked a 1MB Elephant (Node 0).
-* **Logic:** The Elephant flow navigates the "noise" created by 80 bursty Mice flows starting and stopping.
-* **Result:** The Elephant's CWND exhibits a "jagged" pattern as it micro-adjusts to make room for the Mice. This proves Swift's ability to protect the latency of short RPCs while maximizing link utilization.
+* **Workload:** 80% Mice (Short RPCs) and 20% Elephants (Bulk Data).
+* **Logic:** Specifically tracked Node 0 (1MB Elephant) navigating the "noise" of 80 bursty Mice flows.
+* **Result:** The Elephant's CWND exhibited a "jagged" pattern as it micro-adjusted to protect the latency of short RPCs while maximizing total link utilization.
 
 ---
 
