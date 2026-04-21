@@ -1,6 +1,6 @@
 # Evaluation of Google Swift Congestion Control in ns-3
 
-**Authors:** Prayansh Kumar & Ritvji Gopal  
+**Authors:** Prayansh Kumar & Ritvij Gopal  
 **Supervisor:** Prof. T. Venkatesh, Indian Institute of Technology Guwahati (IITG)
 
 ---
